@@ -38,7 +38,7 @@ impl<'a> Iterator for Lexer<'a> {
                     'λ' | '\\' => break Some(Token::Lambda),
                     '.' => break Some(Token::Dot),
                     '\0' => break Some(Token::Eof),
-                    _ if ch.is_alphanumeric() => {
+                    _ if ch.is_alphanumeric() || ch == '_' => {
                         self.buffer.push(ch);
                         match self.chars_peekable.peek() {
                             Some(nch) if nch.is_alphanumeric() && nch != &'λ' => (),

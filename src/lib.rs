@@ -60,6 +60,8 @@ impl<'a> Iterator for Lexer<'a> {
     }
 }
 
+impl<'a> std::iter::FusedIterator for Lexer<'a> {}
+
 #[derive(Debug)]
 pub enum LambdaTerm {
     Abstraction {
@@ -73,9 +75,79 @@ pub enum LambdaTerm {
     Variable(String),
 }
 
-pub struct Parser<'a> {
-    lexer: Lexer<'a>,
-    paren_index: isize,
+use std::collections::HashSet;
+
+impl LambdaTerm {
+    pub fn free_variables(&self) -> HashSet<String> {
+        fn free_variables_mut(term: &LambdaTerm, set: &mut HashSet<String>) {
+            match term {
+                LambdaTerm::Variable(id) => {
+                    set.insert(id.clone());
+                }
+                LambdaTerm::Application { function, argument } => {
+                    free_variables_mut(function, set);
+                    free_variables_mut(argument, set);
+                }
+                LambdaTerm::Abstraction {
+                    bound_variable,
+                    return_term,
+                } => {
+                    free_variables_mut(return_term, set);
+                    set.remove(bound_variable);
+                }
+            }
+        }
+        let mut set = HashSet::new();
+        free_variables_mut(self, &mut set);
+        set
+    }
+
+    pub fn bound_variables(&self) -> HashSet<String> {
+        fn bound_variables_mut(term: &LambdaTerm, set: &mut HashSet<String>) {
+            match term {
+                LambdaTerm::Variable(_) => (),
+                LambdaTerm::Application { function, argument } => {
+                    bound_variables_mut(function, set);
+                    bound_variables_mut(argument, set);
+                }
+                LambdaTerm::Abstraction {
+                    bound_variable,
+                    return_term,
+                } => {
+                    bound_variables_mut(return_term, set);
+                    set.insert(bound_variable.clone());
+                }
+            }
+        }
+        let mut set = HashSet::new();
+        bound_variables_mut(self, &mut set);
+        set
+    }
+}
+
+use std::fmt;
+
+impl fmt::Display for LambdaTerm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LambdaTerm::Variable(id) => write!(f, "{}", id)?,
+            LambdaTerm::Application { function, argument } => {
+                match **function {
+                    LambdaTerm::Abstraction { .. } => write!(f, "({}) ", function)?,
+                    _ => write!(f, "{} ", function)?,
+                }
+                match **argument {
+                    LambdaTerm::Variable(_) => write!(f, "{}", argument)?,
+                    _ => write!(f, "({})", argument)?,
+                }
+            }
+            LambdaTerm::Abstraction {
+                bound_variable,
+                return_term,
+            } => write!(f, "λ{}. {}", bound_variable, return_term)?,
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -89,6 +161,11 @@ pub enum ParserError {
     ExpectedGot(Token, Token),
     Unexpected(Token),
     UnmatchedParens(isize),
+}
+
+pub struct Parser<'a> {
+    lexer: Lexer<'a>,
+    paren_index: isize,
 }
 
 impl<'a> Parser<'a> {
@@ -187,5 +264,163 @@ impl<'a> Parser<'a> {
         } else {
             Ok(())
         }
+    }
+}
+
+pub enum DBTerm {
+    Variable(usize),
+    Application {
+        function: Box<DBTerm>,
+        argument: Box<DBTerm>,
+    },
+    Abstraction(Box<DBTerm>),
+    FreeVariable(String),
+}
+
+pub struct DBLevels(pub DBTerm);
+
+pub struct DBIndices(pub DBTerm);
+
+impl DBTerm {
+    pub fn free_variables(&self) -> HashSet<String> {
+        fn free_variables_mut(term: &DBTerm, set: &mut HashSet<String>) {
+            match term {
+                DBTerm::FreeVariable(id) => {
+                    set.insert(id.clone());
+                }
+                DBTerm::Variable(_) => (),
+                DBTerm::Abstraction(return_term) => free_variables_mut(return_term, set),
+                DBTerm::Application { function, argument } => {
+                    free_variables_mut(function, set);
+                    free_variables_mut(argument, set);
+                }
+            }
+        }
+        let mut set = HashSet::new();
+        free_variables_mut(self, &mut set);
+        set
+    }
+}
+
+impl fmt::Display for DBTerm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DBTerm::Variable(id) => write!(f, "{}", id)?,
+            DBTerm::FreeVariable(id) => write!(f, "{}", id)?,
+            DBTerm::Application { function, argument } => {
+                match **function {
+                    DBTerm::Abstraction { .. } => write!(f, "({}) ", function)?,
+                    _ => write!(f, "{} ", function)?,
+                }
+                match **argument {
+                    DBTerm::Variable(_) | DBTerm::FreeVariable(_) => write!(f, "{}", argument)?,
+                    _ => write!(f, "({})", argument)?,
+                }
+            }
+            DBTerm::Abstraction(return_term) => write!(f, "λ {}", return_term)?,
+        }
+        Ok(())
+    }
+}
+
+impl From<DBLevels> for DBIndices {
+    fn from(levels: DBLevels) -> DBIndices {
+        fn reindex(term: DBTerm, abstraction_depth: usize) -> DBTerm {
+            match term {
+                DBTerm::FreeVariable(id) => DBTerm::FreeVariable(id),
+                DBTerm::Variable(level) => DBTerm::Variable(abstraction_depth - level + 1),
+                DBTerm::Application { function, argument } => DBTerm::Application {
+                    function: Box::new(reindex(*function, abstraction_depth)),
+                    argument: Box::new(reindex(*argument, abstraction_depth)),
+                },
+                DBTerm::Abstraction(return_term) => {
+                    DBTerm::Abstraction(Box::new(reindex(*return_term, abstraction_depth + 1)))
+                }
+            }
+        }
+        let DBLevels(term) = levels;
+        DBIndices(reindex(term, 0))
+    }
+}
+
+impl From<DBIndices> for DBLevels {
+    fn from(indices: DBIndices) -> DBLevels {
+        fn reindex(term: DBTerm, abstraction_depth: usize) -> DBTerm {
+            match term {
+                DBTerm::FreeVariable(id) => DBTerm::FreeVariable(id),
+                DBTerm::Variable(index) => DBTerm::Variable(abstraction_depth - index + 1),
+                DBTerm::Application { function, argument } => DBTerm::Application {
+                    function: Box::new(reindex(*function, abstraction_depth)),
+                    argument: Box::new(reindex(*argument, abstraction_depth)),
+                },
+                DBTerm::Abstraction(return_term) => {
+                    DBTerm::Abstraction(Box::new(reindex(*return_term, abstraction_depth + 1)))
+                }
+            }
+        }
+        let DBIndices(term) = indices;
+        DBLevels(reindex(term, 0))
+    }
+}
+
+impl fmt::Display for DBLevels {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let DBLevels(term) = self;
+        term.fmt(f)
+    }
+}
+
+impl fmt::Display for DBIndices {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let DBIndices(term) = self;
+        term.fmt(f)
+    }
+}
+
+use std::collections::HashMap;
+
+impl From<LambdaTerm> for DBLevels {
+    fn from(lambda: LambdaTerm) -> DBLevels {
+        fn convert(
+            term: LambdaTerm,
+            abstraction_depth: usize,
+            level_map: &mut HashMap<String, usize>,
+        ) -> DBTerm {
+            match term {
+                LambdaTerm::Abstraction {
+                    bound_variable,
+                    return_term,
+                } => {
+                    let new_depth = abstraction_depth + 1;
+                    let opt_old = level_map.insert(bound_variable.clone(), new_depth);
+                    let converted_return = convert(*return_term, new_depth, level_map);
+                    if let Some(old) = opt_old {
+                        level_map.insert(bound_variable, old);
+                    } else {
+                        level_map.remove(&bound_variable);
+                    }
+                    DBTerm::Abstraction(Box::new(converted_return))
+                }
+                LambdaTerm::Application { function, argument } => DBTerm::Application {
+                    function: Box::new(convert(*function, abstraction_depth, level_map)),
+                    argument: Box::new(convert(*argument, abstraction_depth, level_map)),
+                },
+                LambdaTerm::Variable(id) => {
+                    if let Some(level) = level_map.get(&id) {
+                        DBTerm::Variable(*level)
+                    } else {
+                        DBTerm::FreeVariable(id)
+                    }
+                }
+            }
+        }
+        let mut level_map = HashMap::new();
+        DBLevels(convert(lambda, 0, &mut level_map))
+    }
+}
+
+impl From<LambdaTerm> for DBIndices {
+    fn from(lambda: LambdaTerm) -> DBIndices {
+        DBLevels::from(lambda).into()
     }
 }
